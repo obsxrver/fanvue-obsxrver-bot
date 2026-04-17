@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "sync:discord-roles": "node ./scripts/discord-role-sync.mjs",
-    "sync:discord-roles:once": "node ./scripts/discord-role-sync.mjs --once"
+    "sync:discord-roles:once": "node ./scripts/discord-role-sync.mjs --once",
+    "reconcile:discord-bindings": "node ./scripts/discord-binding-reconcile.mjs",
+    "reconcile:discord-bindings:once": "node ./scripts/discord-binding-reconcile.mjs --once"
   },
   "dependencies": {
     "@t3-oss/env-nextjs": "^0.13.8",

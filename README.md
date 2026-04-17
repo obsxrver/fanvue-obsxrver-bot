@@ -111,7 +111,8 @@ Required variables
 - `SESSION_COOKIE_NAME` (default: `fanvue_oauth`)
 - `DISCORD_BOT_TOKEN`: Your Discord bot token
 - `DISCORD_GUILD_ID`: Guild/server ID where the role will be applied
-- `DISCORD_ROLE_ID`: Role ID to assign when a subscriber DMs `/discord <username>`
+- `DISCORD_ROLE_ID`: Role ID to assign when a subscriber DMs `/discord <username>`, or when `obsxrver` sends `/bind <username>` in that fan's DM
+- `DISCORD_BINDINGS_RECONCILE_INTERVAL_HOURS` (optional, default: `24`): How often the reconciliation worker re-checks existing bindings and removes stale subscriber roles
 
 These are not something you should change
 
@@ -135,6 +136,8 @@ DISCORD_GUILD_ID=YOUR_DISCORD_GUILD_ID
 DISCORD_ROLE_ID=YOUR_DISCORD_ROLE_ID
 # Optional: defaults to 20
 DISCORD_SYNC_POLL_INTERVAL_SECONDS=20
+# Optional: defaults to 24
+DISCORD_BINDINGS_RECONCILE_INTERVAL_HOURS=24
 ```
 
 ## Discord DM -> Role sync flow
@@ -142,12 +145,21 @@ DISCORD_SYNC_POLL_INTERVAL_SECONDS=20
 Once configured, the worker does this:
 
 1. Poll recent Fanvue chats.
-2. Parse incoming fan messages that match `/discord <discord username or user id>`.
-3. Verify the sender is an active paid subscriber (`status=subscriber` via Fanvue insights API).
-4. Resolve that Discord member in your configured guild and assign `DISCORD_ROLE_ID`.
+2. Parse either `/discord <discord username or user id>` from the fan, or `/bind <discord username or user id>` from `obsxrver` in that fan's DM thread.
+3. For `/discord`, verify the sender is an active paid subscriber (`status=subscriber` via Fanvue insights API).
+4. Resolve that Discord member in your configured guild, assign `DISCORD_ROLE_ID`, and persist the Fanvue-to-Discord binding for the DM recipient.
 5. Persist state into `data/discord-bindings.json` to avoid duplicate grants and keep the account mapping.
 
 The OAuth callback also stores a refreshable token in `data/oauth-token.json`, which the worker uses for API calls.
+
+## Daily binding reconciliation
+
+The reconciliation worker reads `data/discord-bindings.json`, checks each bound Fanvue account once per interval, and if the account is no longer an active subscriber it:
+
+1. Removes `DISCORD_ROLE_ID` from the bound Discord member.
+2. Deletes that Fanvue-to-Discord binding from `data/discord-bindings.json`.
+
+If the Discord member or role is already gone, the worker still removes the stale binding.
 
 ### Start the worker
 
@@ -161,6 +173,18 @@ One-shot test pass:
 
 ```bash
 pnpm sync:discord-roles:once
+```
+
+Start the reconciliation worker:
+
+```bash
+pnpm reconcile:discord-bindings
+```
+
+One-shot reconciliation pass:
+
+```bash
+pnpm reconcile:discord-bindings:once
 ```
 
 ## Production deployment
@@ -196,7 +220,10 @@ Usage
 
 - Visit `/` and click “Login with Fanvue” once (this seeds `data/oauth-token.json`)
 - Keep `pnpm sync:discord-roles` running on your server
+- Keep `pnpm reconcile:discord-bindings` running on your server
 - When a paying subscriber DMs `/discord <their_discord_username>`, the worker assigns the configured Discord role
+- When `obsxrver` sends `/bind <their_discord_username>` inside a fan DM, the worker binds that DM recipient's Fanvue account to the Discord user and applies the same role
+- Once per day by default, the reconciliation worker removes `DISCORD_ROLE_ID` and deletes bindings for accounts that are no longer active subscribers
 - Mapping state is written to `data/discord-bindings.json`
 - Click “Logout” in the web app only if you want to clear browser session state (worker token remains in `data/oauth-token.json`)
 

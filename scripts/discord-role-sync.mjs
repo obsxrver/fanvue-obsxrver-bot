@@ -12,7 +12,8 @@ const DEFAULT_POLL_INTERVAL_SECONDS = 20;
 const MAX_CHAT_PAGES = 10;
 const MAX_CHAT_MESSAGE_PAGES = 5;
 const MAX_PROCESSED_MESSAGES = 5000;
-const COMMAND_REGEX = /^\/discord\s+(.+)$/i;
+const SUPPORTED_COMMANDS = new Set(["bind", "discord"]);
+const BIND_COMMAND_ALLOWED_HANDLE = "obsxrver";
 const DISCORD_API_BASE_URL = "https://discord.com/api/v10";
 
 const OAUTH_TOKEN_STORE_PATH = join(process.cwd(), "data", "oauth-token.json");
@@ -266,6 +267,16 @@ async function getValidAccessToken(config) {
   return refreshOAuthToken(config, storedToken);
 }
 
+async function getAuthenticatedFanvueHandle(config, accessToken) {
+  try {
+    const currentUser = await fanvueGetJson(config, accessToken, "/users/me");
+    return normalizeFanvueHandle(currentUser?.handle);
+  } catch (error) {
+    console.warn("Unable to verify authenticated Fanvue handle; /bind will be unavailable for this sync pass.", error);
+    return null;
+  }
+}
+
 async function listRecentChats(config, accessToken) {
   const chats = [];
 
@@ -318,6 +329,15 @@ async function sendFanvueReply(config, accessToken, fanUserUuid, text) {
 
 function normalizeDiscordInput(input) {
   return input.trim().replace(/^@/, "");
+}
+
+function normalizeFanvueHandle(handle) {
+  if (typeof handle !== "string") {
+    return null;
+  }
+
+  const normalized = handle.trim().replace(/^@/, "").toLowerCase();
+  return normalized.length > 0 ? normalized : null;
 }
 
 function extractDiscordUserId(input) {
@@ -428,13 +448,25 @@ function getDiscordCommandInput(messageText) {
     return null;
   }
 
-  const match = messageText.trim().match(COMMAND_REGEX);
-  if (!match?.[1]) {
+  const match = messageText.trim().match(/^\/([a-z]+)\s+(.+)$/i);
+  if (!match?.[1] || !match[2]) {
     return null;
   }
 
-  const input = match[1].trim();
-  return input.length > 0 ? input : null;
+  const commandName = match[1].toLowerCase();
+  if (!SUPPORTED_COMMANDS.has(commandName)) {
+    return null;
+  }
+
+  const input = match[2].trim();
+  if (input.length === 0) {
+    return null;
+  }
+
+  return {
+    commandName,
+    input,
+  };
 }
 
 function summarizeDiscordMatchAmbiguity(matches) {
@@ -449,6 +481,53 @@ function isClientError(error) {
   return error instanceof HttpError && error.status >= 400 && error.status < 500;
 }
 
+async function bindDiscordAccount({
+  config,
+  fanUserUuid,
+  fanHandle,
+  discordInput,
+  sourceMessageUuid,
+  sourceCommandName,
+  requestedByFanvueHandle,
+}) {
+  const memberResolution = await resolveDiscordMember(config, discordInput);
+
+  if (memberResolution.kind === "not_found") {
+    return memberResolution;
+  }
+
+  if (memberResolution.kind === "ambiguous") {
+    return memberResolution;
+  }
+
+  try {
+    await assignDiscordRole(config, memberResolution.member.user.id);
+  } catch (error) {
+    if (isClientError(error)) {
+      return { kind: "role_assignment_failed" };
+    }
+    throw error;
+  }
+
+  return {
+    kind: "bound",
+    binding: {
+      fanvueUserUuid: fanUserUuid,
+      fanvueHandle: fanHandle,
+      discordInput,
+      discordUserId: memberResolution.member.user.id,
+      discordUsername: memberResolution.member.user.username,
+      discordDisplayName: memberResolution.member.user.global_name ?? memberResolution.member.nick,
+      sourceMessageUuid,
+      sourceCommandName,
+      requestedByFanvueHandle: requestedByFanvueHandle ?? null,
+      assignedRoleId: config.discordRoleId,
+      updatedAt: new Date().toISOString(),
+    },
+    member: memberResolution.member,
+  };
+}
+
 async function processDiscordCommand({ config, accessToken, fanUserUuid, fanHandle, discordInput, sourceMessageUuid }) {
   const fanStatus = await getFanStatus(config, accessToken, fanUserUuid);
 
@@ -458,48 +537,95 @@ async function processDiscordCommand({ config, accessToken, fanUserUuid, fanHand
     };
   }
 
-  const memberResolution = await resolveDiscordMember(config, discordInput);
-
-  if (memberResolution.kind === "not_found") {
-    return {
-      replyText: `I couldn't find \`${memberResolution.normalizedInput}\` in the Discord server. Make sure to join the server first. [https://discord.gg/8wMr2mmaRF](https://discord.gg/8wMr2mmaRF). Please send your exact username or user ID.`,
-    };
-  }
-
-  if (memberResolution.kind === "ambiguous") {
-    return {
-      replyText: summarizeDiscordMatchAmbiguity(memberResolution.matches),
-    };
-  }
-
-  try {
-    await assignDiscordRole(config, memberResolution.member.user.id);
-  } catch (error) {
-    if (isClientError(error)) {
-      return {
-        replyText:
-          "I could not assign your Discord role right now. Please ask the creator to check bot permissions and role hierarchy.",
-      };
-    }
-    throw error;
-  }
-
-  const binding = {
-    fanvueUserUuid: fanUserUuid,
-    fanvueHandle: fanHandle,
+  const outcome = await bindDiscordAccount({
+    config,
+    fanUserUuid,
+    fanHandle,
     discordInput,
-    discordUserId: memberResolution.member.user.id,
-    discordUsername: memberResolution.member.user.username,
-    discordDisplayName: memberResolution.member.user.global_name ?? memberResolution.member.nick,
     sourceMessageUuid,
-    assignedRoleId: config.discordRoleId,
-    updatedAt: new Date().toISOString(),
-  };
+    sourceCommandName: "discord",
+    requestedByFanvueHandle: fanHandle,
+  });
+
+  if (outcome.kind === "not_found") {
+    return {
+      replyText: `I couldn't find \`${outcome.normalizedInput}\` in the Discord server. Make sure to join the server first. [https://discord.gg/8wMr2mmaRF](https://discord.gg/8wMr2mmaRF). Please send your exact username or user ID.`,
+    };
+  }
+
+  if (outcome.kind === "ambiguous") {
+    return {
+      replyText: summarizeDiscordMatchAmbiguity(outcome.matches),
+    };
+  }
+
+  if (outcome.kind === "role_assignment_failed") {
+    return {
+      replyText:
+        "I could not assign your Discord role right now. Please ask the creator to check bot permissions and role hierarchy.",
+    };
+  }
 
   return {
     roleGranted: true,
-    binding,
-    replyText: `Success - linked to Discord user \`${memberResolution.member.user.username}\` and applied your server role.`,
+    binding: outcome.binding,
+    replyText: `Success - linked to Discord user \`${outcome.member.user.username}\` and applied your server role.`,
+  };
+}
+
+async function processBindCommand({
+  config,
+  authenticatedFanvueHandle,
+  fanUserUuid,
+  fanHandle,
+  discordInput,
+  sourceMessageUuid,
+}) {
+  if (!authenticatedFanvueHandle) {
+    return {
+      replyText: "I couldn't verify the authenticated Fanvue handle, so `/bind` is unavailable right now.",
+    };
+  }
+
+  if (authenticatedFanvueHandle !== BIND_COMMAND_ALLOWED_HANDLE) {
+    return {
+      replyText: `Only @${BIND_COMMAND_ALLOWED_HANDLE} can use \`/bind\`.`,
+    };
+  }
+
+  const outcome = await bindDiscordAccount({
+    config,
+    fanUserUuid,
+    fanHandle,
+    discordInput,
+    sourceMessageUuid,
+    sourceCommandName: "bind",
+    requestedByFanvueHandle: authenticatedFanvueHandle,
+  });
+
+  if (outcome.kind === "not_found") {
+    return {
+      replyText: `I couldn't find \`${outcome.normalizedInput}\` in the Discord server. Make sure to join the server first. [https://discord.gg/8wMr2mmaRF](https://discord.gg/8wMr2mmaRF). Please send the exact username or user ID.`,
+    };
+  }
+
+  if (outcome.kind === "ambiguous") {
+    return {
+      replyText: summarizeDiscordMatchAmbiguity(outcome.matches),
+    };
+  }
+
+  if (outcome.kind === "role_assignment_failed") {
+    return {
+      replyText:
+        "I could not assign the Discord role right now. Please check bot permissions and role hierarchy.",
+    };
+  }
+
+  return {
+    roleGranted: true,
+    binding: outcome.binding,
+    replyText: `Success - linked fan \`${fanHandle}\` to Discord user \`${outcome.member.user.username}\` and applied the server role.`,
   };
 }
 
@@ -519,6 +645,7 @@ async function runSyncPass(config) {
 
   const tokenRecord = await getValidAccessToken(config);
   const accessToken = tokenRecord.accessToken;
+  const authenticatedFanvueHandle = await getAuthenticatedFanvueHandle(config, accessToken);
 
   const chats = await listRecentChats(config, accessToken);
   stats.chatsScanned = chats.length;
@@ -541,20 +668,33 @@ async function runSyncPass(config) {
 
       let shouldMarkMessageAsProcessed = true;
 
-      if (message.sender.uuid === fanUserUuid) {
-        const discordInput = getDiscordCommandInput(message.text);
-        if (discordInput) {
+      const command = getDiscordCommandInput(message.text);
+      if (command) {
+        const isFanMessage = message.sender.uuid === fanUserUuid;
+        const shouldHandleDiscordCommand = command.commandName === "discord" && isFanMessage;
+        const shouldHandleBindCommand = command.commandName === "bind" && !isFanMessage;
+
+        if (shouldHandleDiscordCommand || shouldHandleBindCommand) {
           stats.commandMessages += 1;
 
           try {
-            const outcome = await processDiscordCommand({
-              config,
-              accessToken,
-              fanUserUuid,
-              fanHandle: chat.user.handle,
-              discordInput,
-              sourceMessageUuid: message.uuid,
-            });
+            const outcome = shouldHandleDiscordCommand
+              ? await processDiscordCommand({
+                  config,
+                  accessToken,
+                  fanUserUuid,
+                  fanHandle: chat.user.handle,
+                  discordInput: command.input,
+                  sourceMessageUuid: message.uuid,
+                })
+              : await processBindCommand({
+                  config,
+                  authenticatedFanvueHandle,
+                  fanUserUuid,
+                  fanHandle: chat.user.handle,
+                  discordInput: command.input,
+                  sourceMessageUuid: message.uuid,
+                });
 
             if (outcome.replyText) {
               try {
@@ -575,7 +715,7 @@ async function runSyncPass(config) {
             }
           } catch (error) {
             stats.failures += 1;
-            console.error(`Failed handling /discord command from fan ${chat.user.handle}`, error);
+            console.error(`Failed handling /${command.commandName} command in chat with fan ${chat.user.handle}`, error);
             shouldMarkMessageAsProcessed = false;
           }
         }
