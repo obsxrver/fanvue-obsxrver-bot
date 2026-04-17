@@ -14,6 +14,7 @@ const MAX_CHAT_MESSAGE_PAGES = 5;
 const MAX_PROCESSED_MESSAGES = 5000;
 const SUPPORTED_COMMANDS = new Set(["bind", "discord"]);
 const BIND_COMMAND_ALLOWED_HANDLE = "obsxrver";
+const BIND_COMMAND_ALLOWED_USER_UUID = "b684ec34-2373-40d9-bd8d-5e5ce82ab727";
 const DISCORD_API_BASE_URL = "https://discord.com/api/v10";
 
 const OAUTH_TOKEN_STORE_PATH = join(process.cwd(), "data", "oauth-token.json");
@@ -267,16 +268,6 @@ async function getValidAccessToken(config) {
   return refreshOAuthToken(config, storedToken);
 }
 
-async function getAuthenticatedFanvueHandle(config, accessToken) {
-  try {
-    const currentUser = await fanvueGetJson(config, accessToken, "/users/me");
-    return normalizeFanvueHandle(currentUser?.handle);
-  } catch (error) {
-    console.warn("Unable to verify authenticated Fanvue handle; /bind will be unavailable for this sync pass.", error);
-    return null;
-  }
-}
-
 async function listRecentChats(config, accessToken) {
   const chats = [];
 
@@ -329,15 +320,6 @@ async function sendFanvueReply(config, accessToken, fanUserUuid, text) {
 
 function normalizeDiscordInput(input) {
   return input.trim().replace(/^@/, "");
-}
-
-function normalizeFanvueHandle(handle) {
-  if (typeof handle !== "string") {
-    return null;
-  }
-
-  const normalized = handle.trim().replace(/^@/, "").toLowerCase();
-  return normalized.length > 0 ? normalized : null;
 }
 
 function extractDiscordUserId(input) {
@@ -575,19 +557,13 @@ async function processDiscordCommand({ config, accessToken, fanUserUuid, fanHand
 
 async function processBindCommand({
   config,
-  authenticatedFanvueHandle,
+  messageSenderUuid,
   fanUserUuid,
   fanHandle,
   discordInput,
   sourceMessageUuid,
 }) {
-  if (!authenticatedFanvueHandle) {
-    return {
-      replyText: "I couldn't verify the authenticated Fanvue handle, so `/bind` is unavailable right now.",
-    };
-  }
-
-  if (authenticatedFanvueHandle !== BIND_COMMAND_ALLOWED_HANDLE) {
+  if (messageSenderUuid !== BIND_COMMAND_ALLOWED_USER_UUID) {
     return {
       replyText: `Only @${BIND_COMMAND_ALLOWED_HANDLE} can use \`/bind\`.`,
     };
@@ -600,7 +576,7 @@ async function processBindCommand({
     discordInput,
     sourceMessageUuid,
     sourceCommandName: "bind",
-    requestedByFanvueHandle: authenticatedFanvueHandle,
+    requestedByFanvueHandle: BIND_COMMAND_ALLOWED_HANDLE,
   });
 
   if (outcome.kind === "not_found") {
@@ -645,7 +621,6 @@ async function runSyncPass(config) {
 
   const tokenRecord = await getValidAccessToken(config);
   const accessToken = tokenRecord.accessToken;
-  const authenticatedFanvueHandle = await getAuthenticatedFanvueHandle(config, accessToken);
 
   const chats = await listRecentChats(config, accessToken);
   stats.chatsScanned = chats.length;
@@ -689,7 +664,7 @@ async function runSyncPass(config) {
                 })
               : await processBindCommand({
                   config,
-                  authenticatedFanvueHandle,
+                  messageSenderUuid: message.sender.uuid,
                   fanUserUuid,
                   fanHandle: chat.user.handle,
                   discordInput: command.input,
