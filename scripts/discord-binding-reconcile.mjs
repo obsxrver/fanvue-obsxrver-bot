@@ -9,6 +9,7 @@ const DEFAULT_FANVUE_API_BASE_URL = "https://api.fanvue.com";
 const DEFAULT_FANVUE_OAUTH_BASE_URL = "https://auth.fanvue.com";
 const DEFAULT_FANVUE_API_VERSION = "2025-06-26";
 const DEFAULT_RECONCILE_INTERVAL_HOURS = 24;
+const FAN_INSIGHTS_RECONCILE_COOLDOWN_MS = 30_000;
 const DISCORD_API_BASE_URL = "https://discord.com/api/v10";
 
 const OAUTH_TOKEN_STORE_PATH = join(process.cwd(), "data", "oauth-token.json");
@@ -247,6 +248,21 @@ async function getFanStatus(config, accessToken, fanUserUuid) {
   }
 }
 
+async function getFanStatusWithCooldown(config, accessToken, fanUserUuid, cooldownState) {
+  if (cooldownState.lastFinishedAt > 0) {
+    const waitMs = cooldownState.lastFinishedAt + FAN_INSIGHTS_RECONCILE_COOLDOWN_MS - Date.now();
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+  }
+
+  try {
+    return await getFanStatus(config, accessToken, fanUserUuid);
+  } finally {
+    cooldownState.lastFinishedAt = Date.now();
+  }
+}
+
 async function discordDelete(config, path) {
   const url = `${DISCORD_API_BASE_URL}${path}`;
   await requestVoid(url, {
@@ -289,11 +305,12 @@ async function reconcileBindings(config) {
 
   const tokenRecord = await getValidAccessToken(config);
   const accessToken = tokenRecord.accessToken;
+  const insightsCooldownState = { lastFinishedAt: 0 };
   let storeChanged = false;
 
   for (const [fanUserUuid, binding] of entries) {
     try {
-      const fanStatus = await getFanStatus(config, accessToken, fanUserUuid);
+      const fanStatus = await getFanStatusWithCooldown(config, accessToken, fanUserUuid, insightsCooldownState);
       if (fanStatus === "subscriber") {
         stats.activeSubscribers += 1;
         continue;
